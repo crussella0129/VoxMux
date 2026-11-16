@@ -1,4 +1,4 @@
-"""A minimal MCP client: JSON-RPC 2.0 over a server's stdin and stdout."""
+"""mcp_client.py: a small Model Context Protocol (MCP) client."""
 
 import json
 import os
@@ -14,9 +14,11 @@ TIMEOUT_SECONDS = 60
 
 
 class MCPServer:
+    """One running MCP server and the tools it offers."""
+
     def __init__(self, name, command, args, folder, env=None):
+        """Start the server, introduce ourselves, and list its tools."""
         self.name = name
-        # "python" means the interpreter running VoxMux, not whatever is on PATH.
         if command == "python":
             program = sys.executable
         else:
@@ -57,21 +59,25 @@ class MCPServer:
             raise
 
     def read_lines(self):
+        """Background thread: copy each line the server writes into the queue."""
         for line in self.process.stdout:
             self.lines.put(line)
         self.lines.put(None)
 
     def send(self, message):
+        """Write one message to the server as a single line of JSON."""
         self.process.stdin.write(json.dumps(message) + "\n")
         self.process.stdin.flush()
 
     def notify(self, method, params=None):
+        """Send a notification: a message that gets no answer."""
         message = {"jsonrpc": "2.0", "method": method}
         if params is not None:
             message["params"] = params
         self.send(message)
 
     def request(self, method, params):
+        """Send a request and wait for the response with the same id."""
         request_id = self.next_id
         self.next_id = self.next_id + 1
         self.send(
@@ -101,6 +107,7 @@ class MCPServer:
                 return message.get("result", {})
 
     def answer_server_request(self, message):
+        """Answer a request the server sent us."""
         if message["method"] == "ping":
             self.send({"jsonrpc": "2.0", "id": message["id"], "result": {}})
         else:
@@ -108,6 +115,7 @@ class MCPServer:
             self.send({"jsonrpc": "2.0", "id": message["id"], "error": error})
 
     def list_tools(self):
+        """Ask for every tool and turn each into a chat-template schema."""
         schemas = []
         cursor = None
         while True:
@@ -131,6 +139,7 @@ class MCPServer:
                 return schemas
 
     def call_tool(self, name, arguments):
+        """Run one of this server's tools and return its result as text."""
         result = self.request("tools/call", {"name": name, "arguments": arguments})
         parts = []
         for part in result.get("content", []):
@@ -144,7 +153,7 @@ class MCPServer:
         return text
 
     def close(self):
-        # Closing stdin asks the server to exit; kill it only if it does not.
+        """Stop the server politely, then close its log file."""
         try:
             self.process.stdin.close()
             self.process.wait(timeout=5)
@@ -154,6 +163,7 @@ class MCPServer:
 
 
 def start_servers(config_path):
+    """Start every server listed in the config file."""
     path = pathlib.Path(config_path)
     servers = []
     problems = []

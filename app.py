@@ -1,9 +1,6 @@
-"""VoxMux: a desktop chat window for local models.
+"""app.py: the VoxMux window, a tiny desktop chat for local models."""
 
-Models run on worker threads, which hand results to the window through a
-queue. Only the main thread touches the widgets.
-"""
-
+import json
 import pathlib
 import queue
 import threading
@@ -23,9 +20,15 @@ DEFAULT_THINKING_INSTRUCTIONS = (
 MCP_CONFIG = pathlib.Path(__file__).with_name("mcp_servers.json")
 MAX_TOOL_ROUNDS = 5
 
+SETTINGS_FILE = pathlib.Path(__file__).with_name("settings.json")
+DENIED = "Error: the user did not allow this tool call."
+
 
 class ChatApp:
+    """The whole window: its widgets, its state, and its behaviour."""
+
     def __init__(self, root):
+        """Set up the window, state, and queue check."""
         self.root = root
         self.root.title("VoxMux")
         self.root.geometry("800x600")
@@ -38,11 +41,16 @@ class ChatApp:
         self.results = queue.Queue()
         self.thinking_instructions = DEFAULT_THINKING_INSTRUCTIONS
         self.toolbox = None
+        self.stop_requested = threading.Event()
+        self.answers = queue.Queue()
+        self.allowed_tools = []
 
         self.build_widgets()
+        self.load_settings()
         self.poll_results()
 
     def build_widgets(self):
+        """Create every widget and place it in the window."""
         top = tk.Frame(self.root)
         top.pack(fill="x", padx=8, pady=8)
 
@@ -63,6 +71,8 @@ class ChatApp:
         tk.Button(top, text="Browse...", command=self.browse).pack(side="left", padx=8)
         self.load_button = tk.Button(top, text="Load", command=self.load_model)
         self.load_button.pack(side="left")
+        self.new_chat_button = tk.Button(top, text="New chat", command=self.new_chat)
+        self.new_chat_button.pack(side="right")
 
         settings = tk.Frame(self.root)
         settings.pack(fill="x", padx=8)
@@ -112,6 +122,10 @@ class ChatApp:
 
         self.send_button = tk.Button(bottom, text="Send", command=self.send)
         self.send_button.pack(side="left", padx=(8, 0))
+        self.stop_button = tk.Button(
+            bottom, text="Stop", command=self.stop, state="disabled"
+        )
+        self.stop_button.pack(side="left", padx=(8, 0))
 
         self.chat_log = scrolledtext.ScrolledText(
             self.root, wrap="word", state="disabled"
@@ -119,6 +133,7 @@ class ChatApp:
         self.chat_log.pack(fill="both", expand=True, padx=8, pady=8)
 
     def browse(self):
+        """Browse button: let the user pick a model, remember the path."""
         if self.backend_kind.get() == "llama_cpp":
             path = filedialog.askopenfilename(filetypes=[("GGUF model", "*.gguf")])
         else:
@@ -129,6 +144,7 @@ class ChatApp:
             self.status.config(text=f"Selected: {path}")
 
     def open_thinking_window(self):
+        """Thinking instructions button: open a small editing window."""
         window = tk.Toplevel(self.root)
         window.title("Thinking mode instructions")
 
@@ -148,10 +164,12 @@ class ChatApp:
         ).pack(pady=(0, 8))
 
     def save_thinking_instructions(self, window, box):
+        """Save button: keep the edited instructions, close the window."""
         self.thinking_instructions = box.get("1.0", "end").strip()
         window.destroy()
 
     def load_model(self):
+        """Load button: start loading the picked model in the background."""
         if not self.model_path:
             self.status.config(text="Pick a model with Browse first.")
             return
@@ -160,7 +178,15 @@ class ChatApp:
         self.status.config(text="Loading model...")
         self.start_worker(self.load_worker, self.backend_kind.get(), self.model_path)
 
+    def new_chat(self):
+        """New chat button: forget the conversation and clear the log."""
+        self.messages = []
+        self.chat_log.config(state="normal")
+        self.chat_log.delete("1.0", "end")
+        self.chat_log.config(state="disabled")
+
     def send(self, event=None):
+        """Send button or Enter: add the message, ask."""
         text = self.entry.get().strip()
         if not text or self.backend is None or self.busy:
             return
@@ -178,16 +204,26 @@ class ChatApp:
         self.append_chat(f"You: {text}\n\nModel: ")
 
         self.set_busy(True)
+        self.stop_requested.clear()
+        self.stop_button.config(state="normal")
         self.status.config(text="Writing a reply...")
         self.start_worker(
             self.reply_worker, system_prompt, temperature, thinking, use_tools
         )
 
+    def stop(self):
+        """Stop button: ask the worker to cut the reply short."""
+        self.stop_requested.set()
+        self.stop_button.config(state="disabled")
+        self.status.config(text="Stopping...")
+
     def start_worker(self, target, *args):
+        """Run target(*args) on a new background thread."""
         thread = threading.Thread(target=target, args=args, daemon=True)
         thread.start()
 
     def load_worker(self, kind, model_path):
+        """Background thread: load a model and tools."""
         try:
             backend = load_backend(kind, model_path)
             toolbox = self.toolbox
@@ -200,6 +236,7 @@ class ChatApp:
             self.results.put(("error", str(error)))
 
     def reply_worker(self, system_prompt, temperature, thinking, use_tools):
+        """Background thread: reply, using tools."""
         try:
             tools = None
             if use_tools:
@@ -207,7 +244,10 @@ class ChatApp:
             for round_number in range(MAX_TOOL_ROUNDS):
                 answer = self.stream_reply(system_prompt, temperature, thinking, tools)
                 text, calls = parse_tool_calls(answer)
-                if not calls or not use_tools:
+                stopped = self.stop_requested.is_set()
+                if stopped or not calls or not use_tools:
+                    if stopped:
+                        self.results.put(("piece", " [stopped]"))
                     self.results.put(("reply", text))
                     return
 
@@ -218,8 +258,11 @@ class ChatApp:
                     {"role": "assistant", "content": text, "tool_calls": tool_calls}
                 )
                 for call in calls:
-                    self.results.put(("status", f"Running tool {call['name']}..."))
-                    result = self.toolbox.run(call["name"], call["arguments"])
+                    if self.may_run(call):
+                        self.results.put(("status", f"Running tool {call['name']}..."))
+                        result = self.toolbox.run(call["name"], call["arguments"])
+                    else:
+                        result = DENIED
                     self.results.put(
                         (
                             "piece",
@@ -237,13 +280,16 @@ class ChatApp:
             self.results.put(("error", str(error)))
 
     def stream_reply(self, system_prompt, temperature, thinking, tools):
+        """Stream one reply into the queue."""
         reply = ""
         shown = ""
-        for piece in self.backend.chat(
+        pieces = self.backend.chat(
             self.messages, system_prompt, temperature, thinking, tools
-        ):
+        )
+        for piece in pieces:
+            if self.stop_requested.is_set():
+                break
             reply = reply + piece
-            # Tool-call markup is for the app, not the reader: hide it.
             visible = reply.split("<tool_call>")[0]
             visible = visible.replace("</think>", "\n[end of thinking]").strip()
             start = len(shown)
@@ -251,9 +297,21 @@ class ChatApp:
             if new_text:
                 self.results.put(("piece", new_text))
                 shown = visible
+        pieces.close()
         return reply.split("</think>")[-1].strip()
 
+    def may_run(self, call):
+        """Background thread: is this tool call allowed to run?"""
+        name = call["name"]
+        owner = self.toolbox.owners.get(name)
+        if owner is None or callable(owner) or name in self.allowed_tools:
+            return True
+        self.results.put(("status", f"Waiting for your answer about {name}..."))
+        self.results.put(("ask", call))
+        return self.answers.get() != "deny"
+
     def poll_results(self):
+        """Main thread, on a timer: apply results."""
         while not self.results.empty():
             kind, value = self.results.get()
 
@@ -261,6 +319,8 @@ class ChatApp:
                 self.append_chat(value)
             elif kind == "status":
                 self.status.config(text=value)
+            elif kind == "ask":
+                self.open_approval_window(value)
             elif kind == "reply":
                 self.messages.append({"role": "assistant", "content": value})
                 self.append_chat("\n\n")
@@ -270,7 +330,7 @@ class ChatApp:
                 backend, toolbox, problems = value
                 self.backend = backend
                 self.toolbox = toolbox
-                self.messages = []
+                self.new_chat()
                 backend.on_compact = lambda: self.results.put(
                     ("status", "Summarising older messages to make room...")
                 )
@@ -288,13 +348,56 @@ class ChatApp:
 
         self.root.after(POLL_INTERVAL_MS, self.poll_results)
 
+    def open_approval_window(self, call):
+        """Main thread: ask whether one MCP tool call may run."""
+        name = call["name"]
+        window = tk.Toplevel(self.root)
+        window.title("Allow this tool?")
+        window.protocol(
+            "WM_DELETE_WINDOW", lambda: self.answer_tool(window, name, "deny")
+        )
+
+        tk.Label(
+            window,
+            text=f"The model wants to run {name} with:\n{call['arguments']}",
+            justify="left",
+            wraplength=420,
+        ).pack(padx=8, pady=8)
+
+        buttons = tk.Frame(window)
+        buttons.pack(padx=8, pady=(0, 8))
+        tk.Button(
+            buttons,
+            text="Allow once",
+            command=lambda: self.answer_tool(window, name, "once"),
+        ).pack(side="left")
+        tk.Button(
+            buttons,
+            text="Always allow",
+            command=lambda: self.answer_tool(window, name, "always"),
+        ).pack(side="left", padx=8)
+        tk.Button(
+            buttons,
+            text="Deny",
+            command=lambda: self.answer_tool(window, name, "deny"),
+        ).pack(side="left")
+
+    def answer_tool(self, window, name, answer):
+        """A button in the approval window: pass the answer on."""
+        if answer == "always":
+            self.allowed_tools.append(name)
+        self.answers.put(answer)
+        window.destroy()
+
     def append_chat(self, text):
+        """Add text to the end of the chat log, exactly as given."""
         self.chat_log.config(state="normal")
         self.chat_log.insert("end", text)
         self.chat_log.config(state="disabled")
         self.chat_log.see("end")
 
     def set_busy(self, busy):
+        """Grey out the buttons while work is running."""
         self.busy = busy
         if busy:
             state = "disabled"
@@ -302,8 +405,49 @@ class ChatApp:
             state = "normal"
         self.load_button.config(state=state)
         self.send_button.config(state=state)
+        self.new_chat_button.config(state=state)
+        if not busy:
+            self.stop_button.config(state="disabled")
+
+    def load_settings(self):
+        """Read settings.json, if there is one, back into the window."""
+        if not SETTINGS_FILE.exists():
+            return
+        try:
+            saved = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            self.backend_kind.set(saved["backend_kind"])
+            self.model_path = saved["model_path"]
+            self.temperature.set(saved["temperature"])
+            self.thinking.set(saved["thinking"])
+            self.thinking_instructions = saved["thinking_instructions"]
+            self.use_tools.set(saved["use_tools"])
+            self.system_box.insert("1.0", saved["system_prompt"])
+            self.allowed_tools = saved["allowed_tools"]
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        if self.model_path:
+            self.status.config(text=f"Selected: {self.model_path}")
+
+    def save_settings(self):
+        """Write the current settings to settings.json."""
+        saved = {
+            "backend_kind": self.backend_kind.get(),
+            "model_path": self.model_path,
+            "temperature": self.temperature.get(),
+            "thinking": self.thinking.get(),
+            "thinking_instructions": self.thinking_instructions,
+            "use_tools": self.use_tools.get(),
+            "system_prompt": self.system_box.get("1.0", "end").strip(),
+            "allowed_tools": self.allowed_tools,
+        }
+        SETTINGS_FILE.write_text(json.dumps(saved, indent=2), encoding="utf-8")
 
     def close(self):
+        """Window closed: save, stop servers, close."""
+        try:
+            self.save_settings()
+        except OSError:
+            pass
         if self.toolbox is not None:
             for server in self.toolbox.servers:
                 server.close()
@@ -311,6 +455,7 @@ class ChatApp:
 
 
 def main():
+    """Create the window, attach the app to it, and run until closed."""
     root = tk.Tk()
     ChatApp(root)
     root.mainloop()

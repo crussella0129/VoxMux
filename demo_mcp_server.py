@@ -1,7 +1,4 @@
-"""A small MCP server with a clock and a notes file, for testing the client.
-
-stdout is the protocol channel, so nothing else may be printed to it.
-"""
+"""demo_mcp_server.py: a tiny MCP server with three tools."""
 
 import datetime
 import json
@@ -40,17 +37,20 @@ TOOLS = [
 
 
 def get_current_time(timezone):
+    """The tools themselves: ordinary functions that return text."""
     now = datetime.datetime.now(zoneinfo.ZoneInfo(timezone))
     return now.strftime(f"%A %d %B %Y, %H:%M in {timezone}")
 
 
 def load_notes():
+    """Read the saved notes, or an empty list if there are none yet."""
     if NOTES_FILE.exists():
         return json.loads(NOTES_FILE.read_text(encoding="utf-8"))
     return []
 
 
 def save_note(text):
+    """Add one note to the file."""
     notes = load_notes()
     notes.append(text)
     NOTES_FILE.write_text(json.dumps(notes, indent=2), encoding="utf-8")
@@ -58,6 +58,7 @@ def save_note(text):
 
 
 def list_notes():
+    """Return every note, one per line, numbered."""
     notes = load_notes()
     if not notes:
         return "There are no notes yet."
@@ -75,6 +76,7 @@ HANDLERS = {
 
 
 def handle(message):
+    """Work out the response to one message, or None for a notification."""
     method = message.get("method")
     if "id" not in message:
         return None
@@ -111,6 +113,7 @@ def handle(message):
 
 
 def main():
+    """Answer messages, one line at a time, until the client goes away."""
     sys.stdin.reconfigure(encoding="utf-8")
     sys.stdout.reconfigure(encoding="utf-8")
     for line in sys.stdin:

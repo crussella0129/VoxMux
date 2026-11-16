@@ -1,4 +1,4 @@
-"""Built-in tools, tool-call parsing, and the toolbox that runs local and MCP tools."""
+"""tools.py: the tools a model may call, and reading its calls back."""
 
 import ast
 import inspect
@@ -30,13 +30,13 @@ LARGEST_RESULT_BITS = 100_000
 
 
 def tool(function):
-    # A tool's docstring is the description the model reads, so keep it.
+    """Decorator: register function as a tool the model may call."""
     TOOLS[function.__name__] = function
     return function
 
 
 def evaluate(node):
-    # Walks the syntax tree instead of calling eval(), so only arithmetic runs.
+    """Work out the value of one piece of a parsed arithmetic expression."""
     if isinstance(node, ast.Expression):
         return evaluate(node.body)
     if isinstance(node, ast.Constant) and type(node.value) in (int, float):
@@ -45,7 +45,6 @@ def evaluate(node):
         left = evaluate(node.left)
         right = evaluate(node.right)
         if isinstance(node.op, ast.Pow):
-            # Refuse powers whose result would take minutes to compute.
             result_bits = abs(int(left)).bit_length() * abs(right)
             if abs(right) > LARGEST_POWER or result_bits > LARGEST_RESULT_BITS:
                 raise ValueError("that power is too large")
@@ -68,6 +67,7 @@ def random_number(low: int, high: int) -> str:
 
 
 def schema_for(function):
+    """Describe a function the way chat templates expect a tool described."""
     properties = {}
     required = []
     for name, parameter in inspect.signature(function).parameters.items():
@@ -89,11 +89,11 @@ def schema_for(function):
 
 
 def parse_tool_calls(text):
+    """Split a reply into the text before any tool call, and the calls."""
     before = text.split("<tool_call>")[0].strip()
     calls = []
     for body in CALL_PATTERN.findall(text):
         body = body.strip()
-        # Qwen writes <function=...> XML; most other families write JSON.
         if body.startswith("{"):
             try:
                 data = json.loads(body)
@@ -114,6 +114,7 @@ def parse_tool_calls(text):
 
 
 def convert(value, type_name):
+    """Turn a value the model wrote into the type a tool asked for."""
     if not isinstance(value, str):
         return value
     if type_name == "integer":
@@ -128,7 +129,10 @@ def convert(value, type_name):
 
 
 class Toolbox:
+    """Every tool the model may call, built-in or from an MCP server."""
+
     def __init__(self, servers):
+        """Gather the built-in tools, then each server's tools."""
         self.servers = servers
         self.schemas = []
         self.owners = {}
@@ -140,6 +144,7 @@ class Toolbox:
                 self.add(schema, server)
 
     def add(self, schema, owner):
+        """Add one tool, unless a tool with that name is already in."""
         name = schema["function"]["name"]
         if name in self.owners:
             return
@@ -149,6 +154,7 @@ class Toolbox:
         self.properties[name] = parameters.get("properties", {})
 
     def run(self, name, arguments):
+        """Run the tool called name and return its result as text."""
         if name not in self.owners:
             return f"Error: there is no tool called {name}."
         try:

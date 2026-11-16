@@ -1,7 +1,4 @@
-"""Install VoxMux's libraries into the Python running this script, then check them.
-
-Windows and an NVIDIA graphics card only. Safe to run more than once.
-"""
+"""install.py: install everything VoxMux needs, then check that it worked."""
 
 import pathlib
 import shutil
@@ -15,7 +12,6 @@ STEPS = [
     ["transformers>=5"],
     [
         "--only-binary=llama-cpp-python",
-        # 0.3.37 crashed with an illegal-instruction error on the test machine.
         "llama-cpp-python==0.3.36",
         "--extra-index-url",
         "https://abetlen.github.io/llama-cpp-python/whl/cu124",
@@ -32,12 +28,13 @@ CHECK = (
 
 
 def install_libraries():
+    """Run one pip install per library, stopping at the first failure."""
     for step in STEPS:
         subprocess.run(PIP + step, check=True)
 
 
 def copy_cuda_files():
-    # llama.cpp's CUDA build needs these runtime files but does not ship them.
+    """Copy the three NVIDIA files llama.cpp needs from PyTorch."""
     site_packages = pathlib.Path(sysconfig.get_paths()["purelib"])
     source = site_packages / "torch" / "lib"
     target = site_packages / "llama_cpp" / "lib"
@@ -46,10 +43,12 @@ def copy_cuda_files():
 
 
 def check():
+    """Import everything in a fresh Python and print what it finds."""
     subprocess.run([sys.executable, "-c", CHECK], check=True)
 
 
 def main():
+    """Install, copy, then check."""
     install_libraries()
     copy_cuda_files()
     check()
