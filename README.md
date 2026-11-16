@@ -74,7 +74,7 @@ Servers start when the first model loads and stop when the window closes. Each s
 
 ## This repository is generated
 
-Nothing here is edited by hand. Every file is written by [`tools/make_app.py`](https://github.com/crussella0129/VoxMux_Tutorial/blob/0ca033cb7bf039609300fea3a5efc67a084f8f29/tools/make_app.py) in the tutorial repository, from the tutorial's [`answer_key_level3/`](https://github.com/crussella0129/VoxMux_Tutorial/tree/0ca033cb7bf039609300fea3a5efc67a084f8f29/answer_key_level3) with the teaching text removed. `SOURCE` names the exact tutorial commit, and a check on every push rebuilds the files from that commit and fails if anything differs.
+Nothing here is edited by hand. Every file is written by [`tools/make_app.py`](https://github.com/crussella0129/VoxMux_Tutorial/blob/65329996d2c93f37c841024370fa63afd4ea7719/tools/make_app.py) in the tutorial repository, from the tutorial's [`answer_key_level3/`](https://github.com/crussella0129/VoxMux_Tutorial/tree/65329996d2c93f37c841024370fa63afd4ea7719/answer_key_level3) with the teaching text removed. `SOURCE` names the exact tutorial commit, and a check on every push rebuilds the files from that commit and fails if anything differs.
 
 To change the app, change the tutorial, then run this from the tutorial folder:
 
