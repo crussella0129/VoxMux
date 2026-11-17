@@ -88,29 +88,61 @@ def schema_for(function):
     }
 
 
-def parse_tool_calls(text):
-    """Split a reply into the text before any tool call, and the calls."""
-    before = text.split("<tool_call>")[0].strip()
+def text_before_call(text):
+    """Return the part of a reply that comes before any tool call."""
+    if text.lstrip()[:1] in ("{", "["):
+        return ""
+    return text.split("<tool_call>")[0]
+
+
+def json_calls(text):
+    """Read every tool call that is written as JSON somewhere in text."""
+    decoder = json.JSONDecoder()
     calls = []
-    for body in CALL_PATTERN.findall(text):
-        body = body.strip()
-        if body.startswith("{"):
-            try:
-                data = json.loads(body)
-                arguments = data.get("arguments", {})
-                if isinstance(arguments, str):
-                    arguments = json.loads(arguments)
-            except (ValueError, AttributeError):
-                continue
-            calls.append({"name": data.get("name", ""), "arguments": arguments})
+    position = 0
+    while position < len(text):
+        if text[position] not in "{[":
+            position = position + 1
             continue
+        try:
+            value, position = decoder.raw_decode(text, position)
+        except ValueError:
+            position = position + 1
+            continue
+        if isinstance(value, dict):
+            value = [value]
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name") or item.get("function")
+            arguments = item.get("arguments", item.get("parameters"))
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except ValueError:
+                    continue
+            if isinstance(name, str) and isinstance(arguments, dict):
+                calls.append({"name": name, "arguments": arguments})
+    return calls
+
+
+def parse_tool_calls(text):
+    """Split a reply into its text and its tool calls."""
+    before = text_before_call(text)
+    rest = text[len(before) :]
+    calls = []
+    for body in CALL_PATTERN.findall(rest):
         match = FUNCTION_PATTERN.search(body)
         if match:
             arguments = {}
             for key, value in PARAMETER_PATTERN.findall(match.group(2)):
                 arguments[key] = value.strip("\n")
             calls.append({"name": match.group(1), "arguments": arguments})
-    return before, calls
+    if not calls:
+        calls = json_calls(rest)
+    if not calls:
+        return text.strip(), []
+    return before.strip(), calls
 
 
 def convert(value, type_name):

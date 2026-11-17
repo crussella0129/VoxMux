@@ -5,6 +5,8 @@ import threading
 MAX_NEW_TOKENS = 4096
 SMALLEST_CONTEXT = 4096
 
+LARGEST_CONTEXT = 32768
+
 SUMMARY_INSTRUCTIONS = (
     "Summarise the conversation below so it can be continued later. Keep "
     "every name, number, fact, decision and open question. Write plain "
@@ -35,10 +37,7 @@ class Backend:
         reserve = min(MAX_NEW_TOKENS, self.context_size // 2)
         room = self.context_size - reserve
         while True:
-            full = messages
-            if system_prompt:
-                full = [{"role": "system", "content": system_prompt}] + messages
-            prompt = self.build_prompt(full, thinking, tools)
+            prompt = self.build_with_system(messages, system_prompt, thinking, tools)
             if self.count_tokens(prompt) <= room:
                 return prompt
             before = len(messages)
@@ -50,8 +49,20 @@ class Backend:
                 return prompt
             del messages[:second_user]
 
+    def build_with_system(self, messages, system_prompt, thinking, tools):
+        """Build the prompt with the system prompt in it, one way or another."""
+        if not system_prompt:
+            return self.build_prompt(messages, thinking, tools)
+        system = {"role": "system", "content": system_prompt}
+        try:
+            return self.build_prompt([system] + messages, thinking, tools)
+        except Exception:
+            first = dict(messages[0])
+            first["content"] = system_prompt + "\n\n" + first["content"]
+            return self.build_prompt([first] + messages[1:], thinking, tools)
+
     def compact(self, messages, room):
-        """Replace the older half of messages with a short summary."""
+        """Replace the older half with a short summary."""
         cut = find_user(messages, max(len(messages) // 2, 3))
         if cut is None:
             return
@@ -61,11 +72,8 @@ class Backend:
         for message in older:
             if message.get("content"):
                 lines.append(f"{message['role']}: {message['content']}")
-        request = [
-            {"role": "system", "content": SUMMARY_INSTRUCTIONS},
-            {"role": "user", "content": "\n\n".join(lines)},
-        ]
-        prompt = self.build_prompt(request, False, None)
+        request = [{"role": "user", "content": "\n\n".join(lines)}]
+        prompt = self.build_with_system(request, SUMMARY_INSTRUCTIONS, False, None)
         if self.count_tokens(prompt) > room:
             return
 
@@ -80,18 +88,28 @@ class Backend:
             {"role": "assistant", "content": "Thanks, I have that summary."},
         ]
 
+    def offers_tools(self, tools):
+        """Say whether this model's chat template describes tools."""
+        sample = [{"role": "user", "content": "Hello"}]
+        with_tools = self.build_prompt(sample, False, tools)
+        return with_tools != self.build_prompt(sample, False, None)
+
+    def unload(self):
+        """Give back the memory the model takes up."""
+
 
 class LlamaCppBackend(Backend):
     """Runs a single .gguf file through llama.cpp."""
 
     def __init__(self, model_path):
-        """Load the .gguf file with as much context as will fit."""
+        """Load the .gguf file with a context that fits."""
         from llama_cpp import Llama
         from llama_cpp.llama_chat_format import Jinja2ChatFormatter
 
         info = Llama(model_path=model_path, vocab_only=True, verbose=False)
         architecture = info.metadata["general.architecture"]
         size = int(info.metadata[f"{architecture}.context_length"])
+        size = min(size, LARGEST_CONTEXT)
 
         while True:
             try:
@@ -129,9 +147,13 @@ class LlamaCppBackend(Backend):
         return len(tokens)
 
     def stream(self, prompt, temperature):
-        """Yield the text the model writes after prompt, piece by piece."""
+        """Yield the text the model writes after prompt."""
+        tokens = self.llm.tokenize(prompt.encode("utf-8"), add_bos=False, special=True)
+        start = self.llm.tokenize(b"", add_bos=True)
+        if tokens[: len(start)] != start:
+            tokens = start + tokens
         chunks = self.llm.create_completion(
-            prompt,
+            tokens,
             max_tokens=MAX_NEW_TOKENS,
             temperature=temperature,
             stream=True,
@@ -140,6 +162,10 @@ class LlamaCppBackend(Backend):
             text = chunk["choices"][0]["text"]
             if text:
                 yield text
+
+    def unload(self):
+        """Give the model's memory back to the graphics card."""
+        self.llm.close()
 
 
 class TransformersBackend(Backend):
@@ -225,6 +251,13 @@ class TransformersBackend(Backend):
             thread.join()
         if failures:
             raise failures[0]
+
+    def unload(self):
+        """Give the model's memory back to the graphics card."""
+        import torch
+
+        self.model = None
+        torch.cuda.empty_cache()
 
 
 def load_backend(kind, model_path):

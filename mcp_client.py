@@ -5,6 +5,7 @@ import os
 import pathlib
 import queue
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -17,7 +18,7 @@ class MCPServer:
     """One running MCP server and the tools it offers."""
 
     def __init__(self, name, command, args, folder, env=None):
-        """Start the server, introduce ourselves, and list its tools."""
+        """Start the server and list its tools."""
         self.name = name
         if command == "python":
             program = sys.executable
@@ -28,20 +29,25 @@ class MCPServer:
             environment.update(env)
         log_path = pathlib.Path(folder) / f"mcp-{name}.log"
         self.log = open(log_path, "w", encoding="utf-8")
-        self.process = subprocess.Popen(
-            [program] + list(args),
-            cwd=folder,
-            env=environment,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=self.log,
-            text=True,
-            encoding="utf-8",
-        )
+        try:
+            self.process = subprocess.Popen(
+                [program] + list(args),
+                cwd=folder,
+                env=environment,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=self.log,
+                text=True,
+                encoding="utf-8",
+                start_new_session=True,
+            )
+        except OSError:
+            self.log.close()
+            raise
         self.lines = queue.Queue()
         self.next_id = 1
-        reader = threading.Thread(target=self.read_lines, daemon=True)
-        reader.start()
+        self.reader = threading.Thread(target=self.read_lines, daemon=True)
+        self.reader.start()
 
         try:
             self.request(
@@ -153,13 +159,30 @@ class MCPServer:
         return text
 
     def close(self):
-        """Stop the server politely, then close its log file."""
+        """Stop the server, close its pipe and its log."""
         try:
             self.process.stdin.close()
             self.process.wait(timeout=5)
         except Exception:
-            self.process.kill()
+            self.stop_tree()
+        self.reader.join(timeout=5)
+        if not self.reader.is_alive():
+            self.process.stdout.close()
         self.log.close()
+
+    def stop_tree(self):
+        """End the server by force, with every program it started."""
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(self.process.pid)],
+                capture_output=True,
+            )
+        else:
+            try:
+                os.killpg(self.process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        self.process.wait()
 
 
 def start_servers(config_path):

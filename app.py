@@ -4,12 +4,13 @@ import json
 import pathlib
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, scrolledtext
 
 from backends import load_backend
 from mcp_client import start_servers
-from tools import Toolbox, parse_tool_calls
+from tools import Toolbox, parse_tool_calls, text_before_call
 
 POLL_INTERVAL_MS = 50
 DEFAULT_TEMPERATURE = 0.7
@@ -22,6 +23,8 @@ MAX_TOOL_ROUNDS = 5
 
 SETTINGS_FILE = pathlib.Path(__file__).with_name("settings.json")
 DENIED = "Error: the user did not allow this tool call."
+
+CHATS_FOLDER = pathlib.Path(__file__).with_name("chats")
 
 
 class ChatApp:
@@ -44,6 +47,8 @@ class ChatApp:
         self.stop_requested = threading.Event()
         self.answers = queue.Queue()
         self.allowed_tools = []
+        self.chat_file = None
+        self.offer_tools = False
 
         self.build_widgets()
         self.load_settings()
@@ -73,6 +78,10 @@ class ChatApp:
         self.load_button.pack(side="left")
         self.new_chat_button = tk.Button(top, text="New chat", command=self.new_chat)
         self.new_chat_button.pack(side="right")
+        self.open_chat_button = tk.Button(
+            top, text="Open chat...", command=self.open_chat
+        )
+        self.open_chat_button.pack(side="right", padx=8)
 
         settings = tk.Frame(self.root)
         settings.pack(fill="x", padx=8)
@@ -169,21 +178,67 @@ class ChatApp:
         window.destroy()
 
     def load_model(self):
-        """Load button: start loading the picked model in the background."""
+        """Load button: start loading the picked model."""
         if not self.model_path:
             self.status.config(text="Pick a model with Browse first.")
             return
 
         self.set_busy(True)
+        if self.backend is not None:
+            self.backend.unload()
+            self.backend = None
         self.status.config(text="Loading model...")
         self.start_worker(self.load_worker, self.backend_kind.get(), self.model_path)
 
     def new_chat(self):
-        """New chat button: forget the conversation and clear the log."""
+        """New chat button: start a fresh conversation."""
         self.messages = []
+        self.chat_file = None
         self.chat_log.config(state="normal")
         self.chat_log.delete("1.0", "end")
         self.chat_log.config(state="disabled")
+
+    def open_chat(self):
+        """Open chat button: pick a saved conversation and show it."""
+        path = filedialog.askopenfilename(
+            initialdir=CHATS_FOLDER, filetypes=[("Saved chat", "*.json")]
+        )
+        if path:
+            self.read_chat(path)
+
+    def read_chat(self, path):
+        """Bring one saved conversation back into the window."""
+        try:
+            saved = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+            messages = saved["messages"]
+            log = saved["log"]
+        except (OSError, ValueError, KeyError, TypeError):
+            self.status.config(text=f"Could not open the chat in {path}")
+            return
+        self.new_chat()
+        self.messages = messages
+        self.append_chat(log)
+        self.chat_file = pathlib.Path(path)
+
+    def save_chat(self):
+        """Write this conversation to its file in the chats folder."""
+        try:
+            if self.chat_file is None:
+                CHATS_FOLDER.mkdir(exist_ok=True)
+                name = time.strftime("%Y-%m-%d %H.%M.%S")
+                self.chat_file = CHATS_FOLDER / f"{name}.json"
+                number = 2
+                while self.chat_file.exists():
+                    self.chat_file = CHATS_FOLDER / f"{name} ({number}).json"
+                    number = number + 1
+            saved = {
+                "messages": self.messages,
+                "log": self.chat_log.get("1.0", "end-1c"),
+            }
+            text = json.dumps(saved, indent=2, ensure_ascii=False)
+            self.chat_file.write_text(text, encoding="utf-8")
+        except OSError as error:
+            self.status.config(text=f"Could not save this chat: {error}")
 
     def send(self, event=None):
         """Send button or Enter: add the message, ask."""
@@ -194,7 +249,7 @@ class ChatApp:
         system_prompt = self.system_box.get("1.0", "end").strip()
         temperature = self.temperature.get()
         thinking = self.thinking.get()
-        use_tools = self.use_tools.get()
+        use_tools = self.use_tools.get() and self.offer_tools
         if thinking and self.thinking_instructions:
             system_prompt = system_prompt + "\n\n" + self.thinking_instructions
             system_prompt = system_prompt.strip()
@@ -242,10 +297,11 @@ class ChatApp:
             if use_tools:
                 tools = self.toolbox.schemas
             for round_number in range(MAX_TOOL_ROUNDS):
-                answer = self.stream_reply(system_prompt, temperature, thinking, tools)
-                text, calls = parse_tool_calls(answer)
+                text, calls = self.stream_reply(
+                    system_prompt, temperature, thinking, tools
+                )
                 stopped = self.stop_requested.is_set()
-                if stopped or not calls or not use_tools:
+                if stopped or not calls:
                     if stopped:
                         self.results.put(("piece", " [stopped]"))
                     self.results.put(("reply", text))
@@ -277,10 +333,10 @@ class ChatApp:
             self.results.put(("piece", note))
             self.results.put(("reply", note))
         except Exception as error:
-            self.results.put(("error", str(error)))
+            self.results.put(("failed", str(error)))
 
     def stream_reply(self, system_prompt, temperature, thinking, tools):
-        """Stream one reply into the queue."""
+        """Stream one reply; return its text and calls."""
         reply = ""
         shown = ""
         pieces = self.backend.chat(
@@ -290,7 +346,10 @@ class ChatApp:
             if self.stop_requested.is_set():
                 break
             reply = reply + piece
-            visible = reply.split("<tool_call>")[0]
+            thoughts, end_mark, answer = reply.rpartition("</think>")
+            if tools:
+                answer = text_before_call(answer)
+            visible = thoughts + end_mark + answer
             visible = visible.replace("</think>", "\n[end of thinking]").strip()
             start = len(shown)
             new_text = visible[start:]
@@ -298,7 +357,17 @@ class ChatApp:
                 self.results.put(("piece", new_text))
                 shown = visible
         pieces.close()
-        return reply.split("</think>")[-1].strip()
+
+        answer = reply.split("</think>")[-1].strip()
+        if not tools:
+            return answer, []
+        text, calls = parse_tool_calls(answer)
+        if not calls:
+            whole = reply.replace("</think>", "\n[end of thinking]").strip()
+            held_back = whole[len(shown) :]
+            if held_back:
+                self.results.put(("piece", held_back))
+        return text, calls
 
     def may_run(self, call):
         """Background thread: is this tool call allowed to run?"""
@@ -325,12 +394,13 @@ class ChatApp:
                 self.messages.append({"role": "assistant", "content": value})
                 self.append_chat("\n\n")
                 self.status.config(text=f"Ready: {self.model_path}")
+                self.save_chat()
                 self.set_busy(False)
             elif kind == "loaded":
                 backend, toolbox, problems = value
                 self.backend = backend
                 self.toolbox = toolbox
-                self.new_chat()
+                self.offer_tools = backend.offers_tools(toolbox.schemas)
                 backend.on_compact = lambda: self.results.put(
                     ("status", "Summarising older messages to make room...")
                 )
@@ -338,9 +408,17 @@ class ChatApp:
                     f"Ready: {self.model_path} ({backend.context_size} tokens of "
                     f"context, {len(toolbox.schemas)} tools)"
                 )
+                if not self.offer_tools:
+                    text = text + " This model's template has no place for tools."
                 if problems:
                     text = text + " MCP problems: " + "; ".join(problems)
                 self.status.config(text=text)
+                self.set_busy(False)
+            elif kind == "failed":
+                while self.messages and self.messages.pop()["role"] != "user":
+                    pass
+                self.append_chat(" [failed]\n\n")
+                self.status.config(text=f"Error: {value}")
                 self.set_busy(False)
             elif kind == "error":
                 self.status.config(text=f"Error: {value}")
@@ -406,11 +484,12 @@ class ChatApp:
         self.load_button.config(state=state)
         self.send_button.config(state=state)
         self.new_chat_button.config(state=state)
+        self.open_chat_button.config(state=state)
         if not busy:
             self.stop_button.config(state="disabled")
 
     def load_settings(self):
-        """Read settings.json, if there is one, back into the window."""
+        """Read settings.json back into the window."""
         if not SETTINGS_FILE.exists():
             return
         try:
@@ -423,6 +502,8 @@ class ChatApp:
             self.use_tools.set(saved["use_tools"])
             self.system_box.insert("1.0", saved["system_prompt"])
             self.allowed_tools = saved["allowed_tools"]
+            if saved["chat_file"]:
+                self.read_chat(saved["chat_file"])
         except (OSError, ValueError, KeyError, TypeError):
             pass
         if self.model_path:
@@ -430,6 +511,9 @@ class ChatApp:
 
     def save_settings(self):
         """Write the current settings to settings.json."""
+        chat_file = ""
+        if self.chat_file is not None:
+            chat_file = str(self.chat_file)
         saved = {
             "backend_kind": self.backend_kind.get(),
             "model_path": self.model_path,
@@ -439,6 +523,7 @@ class ChatApp:
             "use_tools": self.use_tools.get(),
             "system_prompt": self.system_box.get("1.0", "end").strip(),
             "allowed_tools": self.allowed_tools,
+            "chat_file": chat_file,
         }
         SETTINGS_FILE.write_text(json.dumps(saved, indent=2), encoding="utf-8")
 
