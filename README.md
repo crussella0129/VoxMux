@@ -12,7 +12,7 @@ Want to build it yourself, line by line? See the step-by-step tutorial at [VoxMu
 - **Streaming replies,** shown as the model writes them, with a **Stop** button to cut one short.
 - **System prompt and temperature** controls.
 - **Thinking mode,** with your own thinking instructions. Reasoning is marked off from the answer.
-- **A context sized to your graphics card.** The app asks for the model's full trained context, up to 32,768 tokens, and halves it until the model loads.
+- **A context sized to your graphics card.** The app asks for the model's full trained context, up to 32,768 tokens, and halves it until the model loads and leaves the card some room to work in.
 - **Compaction.** When a conversation outgrows the context, older messages are summarised by the model rather than dropped.
 - **Tool calling.** The model gets an exact calculator and a random-number tool. Calls are read in Qwen's `<tool_call>` style and in the bare JSON style of Llama 3.2.
 - **An MCP client.** Any [Model Context Protocol](https://modelcontextprotocol.io) server listed in `mcp_servers.json` adds its tools. A small demo server, with a clock and a notes file, is included.
@@ -86,7 +86,7 @@ Besides the included demo server, the client has been run with four official ser
 
 ## This repository is generated
 
-Nothing here is edited by hand. Every file is written by [`tools/make_app.py`](https://github.com/crussella0129/VoxMux_Tutorial/blob/1e4661e70dc8943adb3586d9f2753c209e29f7c9/tools/make_app.py) in the tutorial repository, from the tutorial's [`answer_key_level4/`](https://github.com/crussella0129/VoxMux_Tutorial/tree/1e4661e70dc8943adb3586d9f2753c209e29f7c9/answer_key_level4) with the teaching text removed. `SOURCE` names the exact tutorial commit, and a check on every push rebuilds the files from that commit and fails if anything differs.
+Nothing here is edited by hand. Every file is written by [`tools/make_app.py`](https://github.com/crussella0129/VoxMux_Tutorial/blob/8536cd31b98facdfb9c5d8249faff46f80c83371/tools/make_app.py) in the tutorial repository, from the tutorial's [`answer_key_level4/`](https://github.com/crussella0129/VoxMux_Tutorial/tree/8536cd31b98facdfb9c5d8249faff46f80c83371/answer_key_level4) with the teaching text removed. `SOURCE` names the exact tutorial commit, and a check on every push rebuilds the files from that commit and fails if anything differs.
 
 To change the app, change the tutorial, then run this from the tutorial folder:
 

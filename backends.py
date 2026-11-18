@@ -1,11 +1,14 @@
 """backends.py: the two ways VoxMux can run a model."""
 
+import ctypes
+import importlib
 import threading
 
 MAX_NEW_TOKENS = 4096
 SMALLEST_CONTEXT = 4096
 
 LARGEST_CONTEXT = 32768
+CARD_RESERVE = 512 * 1024 * 1024
 
 SUMMARY_INSTRUCTIONS = (
     "Summarise the conversation below so it can be continued later. Keep "
@@ -119,11 +122,16 @@ class LlamaCppBackend(Backend):
                     n_gpu_layers=-1,
                     verbose=False,
                 )
-                break
+                free = self.card_free()
+                if free is None or free >= CARD_RESERVE:
+                    break
+                if size // 2 < SMALLEST_CONTEXT:
+                    break
+                self.llm.close()
             except ValueError as error:
                 if "llama_context" not in str(error) or size // 2 < SMALLEST_CONTEXT:
                     raise
-                size = size // 2
+            size = size // 2
         self.context_size = size
 
         end_token = info.detokenize([info.token_eos()], special=True)
@@ -167,12 +175,42 @@ class LlamaCppBackend(Backend):
         """Give the model's memory back to the graphics card."""
         self.llm.close()
 
+    def card_free(self):
+        """Return the graphics card's free memory in bytes, or None."""
+        try:
+            from llama_cpp import _ggml
+            from llama_cpp._ctypes_extensions import load_shared_library
+
+            devices = _ggml.libggml
+            details = load_shared_library("ggml-base", _ggml.libggml_base_path)
+            devices.ggml_backend_dev_get.restype = ctypes.c_void_p
+            least = None
+            for index in range(devices.ggml_backend_dev_count()):
+                found = devices.ggml_backend_dev_get(ctypes.c_size_t(index))
+                device = ctypes.c_void_p(found)
+                if details.ggml_backend_dev_type(device) == 0:
+                    continue
+                free = ctypes.c_size_t()
+                total = ctypes.c_size_t()
+                details.ggml_backend_dev_memory(
+                    device, ctypes.byref(free), ctypes.byref(total)
+                )
+                if least is None or free.value < least:
+                    least = free.value
+            return least
+        except Exception:
+            return None
+
 
 class TransformersBackend(Backend):
     """Runs a folder of safetensors weights through PyTorch."""
 
     def __init__(self, model_path):
-        """Load the tokenizer and the model from the folder model_path."""
+        """Load the tokenizer and the model."""
+        try:
+            importlib.import_module("pyarrow")
+        except ImportError:
+            pass
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -186,7 +224,7 @@ class TransformersBackend(Backend):
         self.model.to(self.device)
 
         text_config = self.model.config.get_text_config()
-        self.context_size = text_config.max_position_embeddings
+        self.context_size = min(text_config.max_position_embeddings, LARGEST_CONTEXT)
 
     def build_prompt(self, messages, thinking, tools=None):
         """Turn messages into one prompt string."""

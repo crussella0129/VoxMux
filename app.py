@@ -496,6 +496,8 @@ class ChatApp:
             saved = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
             self.backend_kind.set(saved["backend_kind"])
             self.model_path = saved["model_path"]
+            if self.model_path:
+                self.status.config(text=f"Selected: {self.model_path}")
             self.temperature.set(saved["temperature"])
             self.thinking.set(saved["thinking"])
             self.thinking_instructions = saved["thinking_instructions"]
@@ -506,8 +508,6 @@ class ChatApp:
                 self.read_chat(saved["chat_file"])
         except (OSError, ValueError, KeyError, TypeError):
             pass
-        if self.model_path:
-            self.status.config(text=f"Selected: {self.model_path}")
 
     def save_settings(self):
         """Write the current settings to settings.json."""
